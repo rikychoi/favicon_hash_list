@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thanhpk/go-favicon"
@@ -39,7 +40,6 @@ func main() {
 	cnt := 0
 	for _, result := range results {
 		if result.err != nil {
-			log.Println(result.err)
 			cnt++
 		} else if result.row != nil {
 			data = append(data, result.row)
@@ -68,7 +68,8 @@ type hashResult struct {
 
 // Each worker owns one result slot at a time; read results only after Wait.
 func processRecords(records [][]string, workers int, fetch func(string) (string, error)) []hashResult {
-	loop := 0
+	var completed atomic.Int64
+	log.Printf("처리 시작: 입력 %d행, 고루틴 %d개", len(records), workers)
 	results := make([]hashResult, len(records))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -77,27 +78,34 @@ func processRecords(records [][]string, workers int, fetch func(string) (string,
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				row := records[i]
-				if len(row) == 0 || strings.TrimSpace(row[0]) == "" {
-					results[i].err = fmt.Errorf("행 %d: 빈 도메인", i+1)
-					continue
-				}
-				domain := strings.TrimSpace(row[0])
-				if i == 0 && strings.EqualFold(domain, "domain") {
-					continue
-				}
-				hash, err := fetch(domain)
-				if err != nil {
-					results[i].err = fmt.Errorf("%s: %w", domain, err)
-					continue
-				}
-				results[i].row = []string{domain, hash}
+				func() {
+					defer func() {
+						if results[i].err != nil {
+							log.Println(results[i].err)
+						}
+						n := completed.Add(1)
+						if n%1000 == 0 || n == int64(len(records)) {
+							log.Printf("처리 완료: %d/%d행", n, len(records))
+						}
+					}()
+					row := records[i]
+					if len(row) == 0 || strings.TrimSpace(row[0]) == "" {
+						results[i].err = fmt.Errorf("행 %d: 빈 도메인", i+1)
+						return
+					}
+					domain := strings.TrimSpace(row[0])
+					if i == 0 && strings.EqualFold(domain, "domain") {
+						return
+					}
+					hash, err := fetch(domain)
+					if err != nil {
+						results[i].err = fmt.Errorf("%s: %w", domain, err)
+						return
+					}
+					results[i].row = []string{domain, hash}
+				}()
 			}
 		}()
-		loop++
-		if loop%1000 == 0 {
-			fmt.Println("현재 진행 회수 %d", loop)
-		}
 	}
 	for i := range records {
 		jobs <- i
