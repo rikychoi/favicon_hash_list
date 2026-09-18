@@ -33,8 +33,8 @@ func main() {
 		{"domain", "favicon_hash"},
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	results := processRecords(records, 500, func(domain string) (string, error) {
+	client := &http.Client{Timeout: 8 * time.Second}
+	results := processRecords(records, 200, func(domain string) (string, error) {
 		return fetchHash(client, domain)
 	})
 	cnt := 0
