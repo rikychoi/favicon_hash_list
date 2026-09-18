@@ -34,7 +34,7 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	results := processRecords(records, 10, func(domain string) (string, error) {
+	results := processRecords(records, 500, func(domain string) (string, error) {
 		return fetchHash(client, domain)
 	})
 	cnt := 0
