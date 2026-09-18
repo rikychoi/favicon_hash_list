@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhpk/go-favicon"
@@ -32,63 +33,17 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
+	results := processRecords(records, 10, func(domain string) (string, error) {
+		return fetchHash(client, domain)
+	})
 	cnt := 0
-	for i, row := range records {
-		if len(row) == 0 || strings.TrimSpace(row[0]) == "" {
+	for _, result := range results {
+		if result.err != nil {
+			log.Println(result.err)
 			cnt++
-			continue
+		} else if result.row != nil {
+			data = append(data, result.row)
 		}
-		domain := strings.TrimSpace(row[0])
-		if i == 0 && strings.EqualFold(domain, "domain") {
-			continue
-		}
-		url := domain
-		if !strings.HasPrefix(strings.ToLower(url), "https://") && !strings.HasPrefix(strings.ToLower(url), "http://") {
-			url = "https://" + url
-		}
-		icon, err := favicon.Find(url)
-		if err != nil {
-			log.Println(err)
-			cnt++
-			continue
-		}
-		if len(icon) == 0 {
-			cnt++
-			log.Println("파비콘 없음")
-			continue
-		}
-		var fav string
-		for _, ic := range icon {
-			if strings.HasSuffix(ic.URL, "/favicon.ico") {
-				fav = ic.URL
-				break
-			}
-		}
-		if fav == "" {
-			fav = icon[0].URL
-		}
-		resp, err := client.Get(fav)
-		if err != nil {
-			log.Println(err)
-			cnt++
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			log.Printf("%s: HTTP %d", fav, resp.StatusCode)
-			cnt++
-			continue
-		}
-		favImgBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			log.Println(err)
-			cnt++
-			continue
-		}
-		hash := int32(murmur3.SeedSum32(0, mmh3FaviconInput(favImgBytes)))
-		data = append(data, []string{domain, strconv.FormatInt(int64(hash), 10)})
 	}
 
 	file, err = os.Create("favicon_list.csv")
@@ -104,6 +59,83 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("실패 개수 : %d\n", cnt)
+}
+
+type hashResult struct {
+	row []string
+	err error
+}
+
+// Each worker owns one result slot at a time; read results only after Wait.
+func processRecords(records [][]string, workers int, fetch func(string) (string, error)) []hashResult {
+	results := make([]hashResult, len(records))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				row := records[i]
+				if len(row) == 0 || strings.TrimSpace(row[0]) == "" {
+					results[i].err = fmt.Errorf("행 %d: 빈 도메인", i+1)
+					continue
+				}
+				domain := strings.TrimSpace(row[0])
+				if i == 0 && strings.EqualFold(domain, "domain") {
+					continue
+				}
+				hash, err := fetch(domain)
+				if err != nil {
+					results[i].err = fmt.Errorf("%s: %w", domain, err)
+					continue
+				}
+				results[i].row = []string{domain, hash}
+			}
+		}()
+	}
+	for i := range records {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func fetchHash(client *http.Client, domain string) (string, error) {
+	url := domain
+	if !strings.HasPrefix(strings.ToLower(url), "https://") && !strings.HasPrefix(strings.ToLower(url), "http://") {
+		url = "https://" + url
+	}
+	// Use a separate finder per job to avoid sharing library state.
+	icons, err := favicon.New().Find(url)
+	if err != nil {
+		return "", err
+	}
+	if len(icons) == 0 {
+		return "", fmt.Errorf("파비콘 없음")
+	}
+	fav := icons[0].URL
+	for _, icon := range icons {
+		if strings.HasSuffix(icon.URL, "/favicon.ico") {
+			fav = icon.URL
+			break
+		}
+	}
+	resp, err := client.Get(fav)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("%s: HTTP %d", fav, resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	hash := int32(murmur3.SeedSum32(0, mmh3FaviconInput(data)))
+	return strconv.FormatInt(int64(hash), 10), nil
 }
 
 func mmh3FaviconInput(data []byte) []byte {
