@@ -68,6 +68,7 @@ type hashResult struct {
 
 // Each worker owns one result slot at a time; read results only after Wait.
 func processRecords(records [][]string, workers int, fetch func(string) (string, error)) []hashResult {
+	loop := 0
 	results := make([]hashResult, len(records))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -93,6 +94,10 @@ func processRecords(records [][]string, workers int, fetch func(string) (string,
 				results[i].row = []string{domain, hash}
 			}
 		}()
+		loop++
+		if loop%1000 == 0 {
+			fmt.Println("현재 진행 회수 %d", loop)
+		}
 	}
 	for i := range records {
 		jobs <- i
